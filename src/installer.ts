@@ -92,7 +92,7 @@ export function getCanonicalSkillsDir(global: boolean, cwd?: string): string {
  * redundant symlinks and double-listing of skills.
  */
 export function getAgentBaseDir(agentType: AgentType, global: boolean, cwd?: string): string {
-  if (isUniversalAgent(agentType, { global })) {
+  if (isUniversalAgent(agentType)) {
     return getCanonicalSkillsDir(global, cwd);
   }
 
@@ -292,9 +292,10 @@ export async function installSkillForAgent(
     await cleanAndCreateDirectory(canonicalDir);
     await copyDirectory(skill.path, canonicalDir);
 
-    // For agents whose target directory is already canonical for this scope,
-    // avoid creating a symlink from the skill directory to itself.
-    if (isUniversalAgent(agentType, { global: isGlobal })) {
+    // For universal agents with global install, the skill is already in the canonical
+    // ~/.agents/skills directory. Skip creating a symlink to the agent-specific global dir
+    // (e.g. ~/.copilot/skills) to avoid duplicates.
+    if (isGlobal && isUniversalAgent(agentType)) {
       return {
         success: true,
         path: canonicalDir,
@@ -531,9 +532,8 @@ export async function installRemoteSkillForAgent(
     const skillMdPath = join(canonicalDir, 'SKILL.md');
     await writeFile(skillMdPath, skill.content, 'utf-8');
 
-    // For agents whose target directory is already canonical for this scope,
-    // avoid creating a symlink from the skill directory to itself.
-    if (isUniversalAgent(agentType, { global: isGlobal })) {
+    // For universal agents with global install, skip creating agent-specific symlink
+    if (isGlobal && isUniversalAgent(agentType)) {
       return {
         success: true,
         path: canonicalDir,
@@ -670,9 +670,8 @@ export async function installWellKnownSkillForAgent(
     await cleanAndCreateDirectory(canonicalDir);
     await writeSkillFiles(canonicalDir);
 
-    // For agents whose target directory is already canonical for this scope,
-    // avoid creating a symlink from the skill directory to itself.
-    if (isUniversalAgent(agentType, { global: isGlobal })) {
+    // For universal agents with global install, skip creating agent-specific symlink
+    if (isGlobal && isUniversalAgent(agentType)) {
       return {
         success: true,
         path: canonicalDir,
@@ -786,7 +785,7 @@ export async function installBlobSkillForAgent(
     await cleanAndCreateDirectory(canonicalDir);
     await writeSkillFiles(canonicalDir);
 
-    if (isUniversalAgent(agentType, { global: isGlobal })) {
+    if (isGlobal && isUniversalAgent(agentType)) {
       return {
         success: true,
         path: canonicalDir,

@@ -29,7 +29,6 @@ import {
   installBlobSkillForAgent,
   isSkillInstalled,
   getCanonicalPath,
-  getAgentBaseDir,
   installWellKnownSkillForAgent,
   type InstallMode,
 } from './installer.ts';
@@ -188,10 +187,7 @@ function formatList(items: string[], maxShow: number = 5): string {
  * Splits agents into universal and non-universal (symlinked) groups.
  * Returns display names for each group.
  */
-function splitAgentsByType(
-  agentTypes: AgentType[],
-  options: { global?: boolean } = {}
-): {
+function splitAgentsByType(agentTypes: AgentType[]): {
   universal: string[];
   symlinked: string[];
 } {
@@ -199,7 +195,7 @@ function splitAgentsByType(
   const symlinked: string[] = [];
 
   for (const a of agentTypes) {
-    if (isUniversalAgent(a, options)) {
+    if (isUniversalAgent(a)) {
       universal.push(agents[a].displayName);
     } else {
       symlinked.push(agents[a].displayName);
@@ -212,13 +208,9 @@ function splitAgentsByType(
 /**
  * Builds summary lines showing universal vs symlinked agents
  */
-function buildAgentSummaryLines(
-  targetAgents: AgentType[],
-  installMode: InstallMode,
-  options: { global?: boolean } = {}
-): string[] {
+function buildAgentSummaryLines(targetAgents: AgentType[], installMode: InstallMode): string[] {
   const lines: string[] = [];
-  const { universal, symlinked } = splitAgentsByType(targetAgents, options);
+  const { universal, symlinked } = splitAgentsByType(targetAgents);
 
   if (installMode === 'symlink') {
     if (universal.length > 0) {
@@ -240,11 +232,8 @@ function buildAgentSummaryLines(
  * Ensures universal agents are always included in the target agents list.
  * Used when -y flag is passed or when auto-selecting agents.
  */
-function ensureUniversalAgents(
-  targetAgents: AgentType[],
-  options: { global?: boolean } = {}
-): AgentType[] {
-  const universalAgents = getUniversalAgents(options);
+function ensureUniversalAgents(targetAgents: AgentType[]): AgentType[] {
+  const universalAgents = getUniversalAgents();
   const result = [...targetAgents];
 
   for (const ua of universalAgents) {
@@ -264,13 +253,12 @@ function buildResultLines(
     agent: string;
     symlinkFailed?: boolean;
   }>,
-  targetAgents: AgentType[],
-  options: { global?: boolean } = {}
+  targetAgents: AgentType[]
 ): string[] {
   const lines: string[] = [];
 
   // Split target agents by type
-  const { universal } = splitAgentsByType(targetAgents, options);
+  const { universal, symlinked: symlinkAgents } = splitAgentsByType(targetAgents);
 
   // For symlink results, also track which ones actually succeeded vs failed
   const successfulSymlinks = results
@@ -545,33 +533,6 @@ async function handleWellKnownSkills(
     selectedSkills = selected as WellKnownSkill[];
   }
 
-  let installGlobally = options.global ?? false;
-
-  if (options.global === undefined && !options.yes) {
-    const scope = await p.select({
-      message: 'Installation scope',
-      options: [
-        {
-          value: false,
-          label: 'Project',
-          hint: 'Install in current directory (committed with your project)',
-        },
-        {
-          value: true,
-          label: 'Global',
-          hint: 'Install in home directory (available across all projects)',
-        },
-      ],
-    });
-
-    if (p.isCancel(scope)) {
-      p.cancel('Installation cancelled');
-      process.exit(0);
-    }
-
-    installGlobally = scope as boolean;
-  }
-
   // Detect agents
   let targetAgents: AgentType[];
   const validAgents = Object.keys(agents);
@@ -623,7 +584,7 @@ async function handleWellKnownSkills(
       }
     } else if (installedAgents.length === 1 || options.yes) {
       // Auto-select detected agents + ensure universal agents are included
-      targetAgents = ensureUniversalAgents(installedAgents, { global: installGlobally });
+      targetAgents = ensureUniversalAgents(installedAgents);
       if (installedAgents.length === 1) {
         const firstAgent = installedAgents[0]!;
         p.log.info(`Installing to: ${pc.cyan(agents[firstAgent].displayName)}`);
@@ -633,7 +594,7 @@ async function handleWellKnownSkills(
         );
       }
     } else {
-      const selected = await selectAgentsInteractive({ global: installGlobally });
+      const selected = await selectAgentsInteractive({ global: options.global });
 
       if (p.isCancel(selected)) {
         p.cancel('Installation cancelled');
@@ -644,14 +605,42 @@ async function handleWellKnownSkills(
     }
   }
 
-  const cwd = process.cwd();
+  let installGlobally = options.global ?? false;
+
+  // Check if any selected agents support global installation
+  const supportsGlobal = targetAgents.some((a) => agents[a].globalSkillsDir !== undefined);
+
+  if (options.global === undefined && !options.yes && supportsGlobal) {
+    const scope = await p.select({
+      message: 'Installation scope',
+      options: [
+        {
+          value: false,
+          label: 'Project',
+          hint: 'Install in current directory (committed with your project)',
+        },
+        {
+          value: true,
+          label: 'Global',
+          hint: 'Install in home directory (available across all projects)',
+        },
+      ],
+    });
+
+    if (p.isCancel(scope)) {
+      p.cancel('Installation cancelled');
+      process.exit(0);
+    }
+
+    installGlobally = scope as boolean;
+  }
 
   // Determine install mode (symlink vs copy)
   let installMode: InstallMode = options.copy ? 'copy' : 'symlink';
 
   // Only prompt for install mode when there are multiple unique target directories.
-  // When all selected agents share the same target directory, symlink vs copy is meaningless.
-  const uniqueDirs = new Set(targetAgents.map((a) => getAgentBaseDir(a, installGlobally, cwd)));
+  // When all selected agents share the same skillsDir, symlink vs copy is meaningless.
+  const uniqueDirs = new Set(targetAgents.map((a) => agents[a].skillsDir));
 
   if (!options.copy && !options.yes && uniqueDirs.size > 1) {
     const modeChoice = await p.select({
@@ -676,6 +665,8 @@ async function handleWellKnownSkills(
     // Single target directory — default to copy (no symlink needed)
     installMode = 'copy';
   }
+
+  const cwd = process.cwd();
 
   // Build installation summary
   const summaryLines: string[] = [];
@@ -705,9 +696,7 @@ async function handleWellKnownSkills(
     const canonicalPath = getCanonicalPath(skill.installName, { global: installGlobally });
     const shortCanonical = shortenPath(canonicalPath, cwd);
     summaryLines.push(`${pc.cyan(shortCanonical)}`);
-    summaryLines.push(
-      ...buildAgentSummaryLines(targetAgents, installMode, { global: installGlobally })
-    );
+    summaryLines.push(...buildAgentSummaryLines(targetAgents, installMode));
     if (skill.files.size > 1) {
       summaryLines.push(`  ${pc.dim('files:')} ${skill.files.size}`);
     }
@@ -868,9 +857,7 @@ async function handleWellKnownSkills(
         } else {
           resultLines.push(`${pc.green('✓')} ${skillName}`);
         }
-        resultLines.push(
-          ...buildResultLines(skillResults, targetAgents, { global: installGlobally })
-        );
+        resultLines.push(...buildResultLines(skillResults, targetAgents));
       }
     }
 
@@ -1239,34 +1226,6 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
         )
       : Promise.resolve(null);
 
-    let installGlobally = options.global ?? false;
-
-    if (options.global === undefined && !options.yes) {
-      const scope = await p.select({
-        message: 'Installation scope',
-        options: [
-          {
-            value: false,
-            label: 'Project',
-            hint: 'Install in current directory (committed with your project)',
-          },
-          {
-            value: true,
-            label: 'Global',
-            hint: 'Install in home directory (available across all projects)',
-          },
-        ],
-      });
-
-      if (p.isCancel(scope)) {
-        p.cancel('Installation cancelled');
-        await cleanup(tempDir);
-        process.exit(0);
-      }
-
-      installGlobally = scope as boolean;
-    }
-
     let targetAgents: AgentType[];
     const validAgents = Object.keys(agents);
 
@@ -1319,7 +1278,7 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
         }
       } else if (installedAgents.length === 1 || options.yes) {
         // Auto-select detected agents + ensure universal agents are included
-        targetAgents = ensureUniversalAgents(installedAgents, { global: installGlobally });
+        targetAgents = ensureUniversalAgents(installedAgents);
         if (installedAgents.length === 1) {
           const firstAgent = installedAgents[0]!;
           p.log.info(`Installing to: ${pc.cyan(agents[firstAgent].displayName)}`);
@@ -1329,7 +1288,7 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
           );
         }
       } else {
-        const selected = await selectAgentsInteractive({ global: installGlobally });
+        const selected = await selectAgentsInteractive({ global: options.global });
 
         if (p.isCancel(selected)) {
           p.cancel('Installation cancelled');
@@ -1341,14 +1300,43 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
       }
     }
 
-    const cwd = process.cwd();
+    let installGlobally = options.global ?? false;
+
+    // Check if any selected agents support global installation
+    const supportsGlobal = targetAgents.some((a) => agents[a].globalSkillsDir !== undefined);
+
+    if (options.global === undefined && !options.yes && supportsGlobal) {
+      const scope = await p.select({
+        message: 'Installation scope',
+        options: [
+          {
+            value: false,
+            label: 'Project',
+            hint: 'Install in current directory (committed with your project)',
+          },
+          {
+            value: true,
+            label: 'Global',
+            hint: 'Install in home directory (available across all projects)',
+          },
+        ],
+      });
+
+      if (p.isCancel(scope)) {
+        p.cancel('Installation cancelled');
+        await cleanup(tempDir);
+        process.exit(0);
+      }
+
+      installGlobally = scope as boolean;
+    }
 
     // Determine install mode (symlink vs copy)
     let installMode: InstallMode = options.copy ? 'copy' : 'symlink';
 
     // Only prompt for install mode when there are multiple unique target directories.
-    // When all selected agents share the same target directory, symlink vs copy is meaningless.
-    const uniqueDirs = new Set(targetAgents.map((a) => getAgentBaseDir(a, installGlobally, cwd)));
+    // When all selected agents share the same skillsDir, symlink vs copy is meaningless.
+    const uniqueDirs = new Set(targetAgents.map((a) => agents[a].skillsDir));
 
     if (!options.copy && !options.yes && uniqueDirs.size > 1) {
       const modeChoice = await p.select({
@@ -1374,6 +1362,8 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
       // Single target directory — default to copy (no symlink needed)
       installMode = 'copy';
     }
+
+    const cwd = process.cwd();
 
     // Build installation summary
     const summaryLines: string[] = [];
@@ -1419,9 +1409,7 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
         const canonicalPath = getCanonicalPath(skill.name, { global: installGlobally });
         const shortCanonical = shortenPath(canonicalPath, cwd);
         summaryLines.push(`${pc.cyan(shortCanonical)}`);
-        summaryLines.push(
-          ...buildAgentSummaryLines(targetAgents, installMode, { global: installGlobally })
-        );
+        summaryLines.push(...buildAgentSummaryLines(targetAgents, installMode));
 
         const skillOverwrites = overwriteStatus.get(skill.name);
         const overwriteAgents = targetAgents
@@ -1729,9 +1717,7 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
             } else {
               resultLines.push(`${pc.green('✓')} ${entry.skill}`);
             }
-            resultLines.push(
-              ...buildResultLines(skillResults, targetAgents, { global: installGlobally })
-            );
+            resultLines.push(...buildResultLines(skillResults, targetAgents));
           }
         }
       };
